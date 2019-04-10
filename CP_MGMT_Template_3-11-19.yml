@@ -1,0 +1,279 @@
+heat_template_version: 2018-08-31
+
+parameters:
+
+  cp_name:
+   type: string
+   description: Name of Check Point Management Instance
+   default: CPOpenStack
+
+  cp_hostname:
+   type: string
+   description: Gateway/Cluster/MGMT Hostname
+
+  cp_mgmt_installation:
+    type: string
+    description: Type of Check Point Management - smartcenter / multidomain
+    default: smartcenter
+
+  cp_mgmt_type:
+    type: string
+    description: Primary or Secondary Management Server
+    default: primary
+
+  cp_sic_otp:
+   type: string
+   description: SIC Password - Only If Secondary Management Server
+   hidden: true
+
+  cp_admin_hash:
+   type: string
+   description: admin password hash - to generate - openssl passwd -1 (-one not l) - default admin123
+   default: $1$0JcTFZjf$zd67.5HSIKz8.7K4bvmv31
+
+  cp_gui_admin_user:
+    type: string
+    description: SmartConsole Administrator Username
+
+  cp_gui_admin_password:
+    type: string
+    description: SmartConsole Administrator Password
+    hidden: true
+
+  cp_glance_image:
+   type: string
+   description: Check Point Management Image
+
+  cp_gw_flavor:
+   type: string
+   description: Check Point Management Flavor
+
+  cp_az:
+    type: string
+    description: "Availability Zone"
+
+  mgmt_network_uuid:
+    type: string
+    description: "UUID of the network considered management in openstack"
+
+  mgmt_subnet_uuid:
+    type: string
+    description: "UUID of the subnet inside the management network"
+
+
+resources:
+
+# Management Ports
+ cp_mgmt_port:
+  type: OS::Neutron::Port
+  properties:
+   network_id: {get_param: mgmt_network_uuid }
+   port_security_enabled: false
+   fixed_ips: [{subnet_id : {get_param: mgmt_subnet_uuid}}]
+
+ cp_config_script:
+  type: OS::Heat::SoftwareConfig
+  properties:
+   group: ungrouped
+   config:
+    str_replace:
+        params:
+            __hostname__: {get_param: cp_hostname}
+            __mgmttype__: {get_param: cp_mgmt_type}
+            __mgmtinstall__: {get_param: cp_mgmt_installation}
+            __guiuser__: {get_param: cp_gui_admin_user}
+            __guipass__: {get_param: cp_gui_admin_password}
+            __sicpw__: {get_param: cp_sic_otp}
+            __osadminhash__: {get_param: cp_admin_hash}
+            __default_gw_network__: "eth0"
+            __adminshell__: "/etc/cli.sh"
+        template: |
+            #!/bin/bash
+            ########################################
+            # OpenStack Config Script For Blink Enabled Images
+            # Check Point Software Technologies
+            ###########################
+            # Global Variables
+            ###########################
+
+            MGMT_TYPE="__mgmttype__"
+            MGMT_INSTALL="__mgmtinstall__"
+            DEFAULT_GW_INTERFACE="__default_gw_network__"
+            SIC_KEY="__sicpw__"
+
+            #####################################
+            # configure here admin and expert hash credentials
+            # hash can be obtained from a linux system by looking at /etc/shadow
+            ####################################
+
+            ADMIN_PW_HASH='__osadminhash__'
+            EXPERT_PW_HASH='__osadminhash__'
+            GUI_USER='__guiuser__'
+            GUI_PASS='__guipass__'
+
+            ###############################
+            # DEFAULT SHELL = /etc/cli.sh
+            # Configure above in the 'params' if you would like to change it.
+            ###############################
+
+            ADMIN_SHELL='__adminshell__'
+
+            ############################
+            # MAIN PROGRAM
+            ###########################
+
+            #Set Hostname
+            HOSTNAME="__hostname__"
+            clish -c "set hostname $HOSTNAME"
+
+            #Set NTP Server
+            clish -c "set ntp active on"
+            clish -c "set ntp server primary ntp.checkpoint.com version 4"
+
+            #Make all the strings lowercase
+            DEFAULT_GW_INTERFACE=`echo $DEFAULT_GW_INTERFACE | tr '[A-Z]' '[a-z]'`
+            INSTALL_GW=`echo $INSTALL_GW | tr '[A-Z]' '[a-z]'`
+            INSTALL_MGMT=`echo $INSTALL_MGMT | tr '[A-Z]' '[a-z]'`
+            POST_FIRST_TIME_WIZARD=`echo $POST_FIRST_TIME_WIZARD | tr '[A-Z]' '[a-z]'`
+
+            # set interfaces and routes from network_data.json (metadata)
+            DEFAULT_GW_INTERFACE="eth0"
+            for mac in `ifconfig -a | grep HWadd | awk '{print $5}' | tr '[A-Z]' '[a-z]'`
+            do
+                NIC=`ifconfig -a | grep -i $mac | awk '{print $1}' |  tr '[A-Z]' '[a-z]'`
+                echo $NIC
+                ID_CMD="get-cloud-data.sh openstack/latest/network_data.json | jq --raw-output '.links[] | select (.ethernet_mac_address | contains(\"$mac\")) | .id'"
+                eval NID=\$\(${ID_CMD}\)
+                IP_CMD="get-cloud-data.sh openstack/latest/network_data.json | jq --raw-output '.networks[] | select (.link | contains(\"$NID\"))'"
+                TYPE=`eval $IP_CMD | jq --raw-output .type`
+                IP=`eval $IP_CMD | jq --raw-output .ip_address`
+                NETMASK=`eval $IP_CMD | jq --raw-output .netmask`
+                clish -s -c "set interface $NIC ipv4-address $IP subnet-mask $NETMASK"
+                clish -s -c "set interface $NIC state on"
+                # loop thru the routes
+                ROUTES=`eval $IP_CMD | jq --raw-output .routes`
+                RTLENGTH=`echo $ROUTES | jq '. | length'`
+                RTCOUNTER=0
+                until [ $RTCOUNTER == $RTLENGTH ]
+                do
+                    ROUTE=`echo $ROUTES | jq .[$RTCOUNTER]`
+                    echo $ROUTE
+                    let RTCOUNTER=RTCOUNTER+1
+                    RTNETWORK=`echo $ROUTE | jq --raw-output .network`
+                    RTNETMASK=`echo $ROUTE | jq --raw-output .netmask`
+                    GATEWAY=`echo $ROUTE | jq --raw-output .gateway`
+                    bits="$("$FWDIR/Python/bin/python" -c "print len(''.join([bin(int(o))[2:].zfill(8) for o in '""$RTNETMASK""'.split('.')]).rstrip('0'))" )"
+                    if [ "$RTNETWORK" == "0.0.0.0" ]
+                    then
+                        if [ "$DEFAULT_GW_INTERFACE" == "$NIC" ]
+                        then
+                        clish -s -c "set static-route default nexthop gateway address $GATEWAY on"
+                        fi
+                    else
+                    clish -s -c "set static-route $RTNETWORK/$bits nexthop gateway address $GATEWAY on"
+                    fi
+                done
+
+            echo "======"
+            done
+            #command to set /etc/hosts file to the right interface
+            clish -s -c 'set management interface eth0'
+
+            ###########
+            # Configure Management System
+            ###########
+
+            echo "/etc/hosts before fwt" >> /var/log/fwtlog
+            cat /etc/hosts >> /var/log/fwtlog
+
+            echo "starting first time wizard">> /var/log/fwtlog
+            echo "MGMT_TYPE=$MGMT_TYPE" >> /var/log/fwtlog
+            echo "MGMT_INSTALL=$MGMT_INSTALL" >> /var/log/fwtlog
+            #Configure first time wizard
+            if [ -f "/bin/blink_config" ]; then
+            echo "blink_config found - running blink config">> /var/log/fwtlog
+                if [ $MGMT_INSTALL == "smartcenter" ]; then
+                echo "installation type = smartcenter">> /var/log/fwtlog
+                  if [ $MGMT_TYPE == "primary" ]; then
+                      echo "management type = primary">> /var/log/fwtlog
+                      echo "Configuring Primary SmartCenter using Blink" | tee /dev/console >> /var/log/fwtlog
+                      CNFSYSTEM=`blink_config -s "install_security_gw=false&install_ppak=false&gateway_cluster_member=false&install_security_managment=true&install_mgmt_primary=true&install mgmt_secondary=false&mgmt_admin_name=$GUI_USER&mgmt_admin_passwd=$GUI_PASS&mgmt_gui_clients_radio=any&reboot_if_required=true"`
+                  else
+                      echo "management type = primary">> /var/log/fwtlog
+                      echo "Configuring Secondary SmartCenter using Blink" | tee /dev/console >> /var/log/fwtlog
+                      CNFSYSTEM=`blink_config  -s "install_security_gw=false&install_ppak=false&gateway_cluster_member=false&install_security_managment=true&install_mgmt_primary=false&install mgmt_secondary=true&mgmt_admin_name=$GUI_USER&mgmt_admin_passwd=$GUI_PASS&mgmt_gui_clients_radio=any&ftw_sic_key=$SIC_KEY&reboot_if_required=true"`
+                  fi
+                fi
+
+                if [ $MGMT_INSTALL == "multidomain" ]; then
+                  if [ $MGMT_TYPE == "primary" ]; then
+                    echo "Configuring Primary MultiDomain Server using Blink" | tee /dev/console >> /var/log/fwtlog
+                    CNFSYSTEM=`blink_config -s "install_security_gw=false&install_ppak=false&gateway_cluster_member=false&install_mds_primary=true&install_mds_secondary=false&mgmt_admin_name=$GUI_USER&mgmt_admin_passwd=$GUI_PASS&mgmt_gui_clients_radio=any&install_mds_interface=eth0&reboot_if_required=true"`
+                  else
+                    echo "Configuring Secondary MultiDomain Server using Blink" | tee /dev/console >> /var/log/fwtlog
+                    CNFSYSTEM=`blink_config -s "install_security_gw=false&install_ppak=false&gateway_cluster_member=false&install_mds_primary=false&install_mds_secondary=true&mgmt_admin_name=$GUI_USER&mgmt_admin_passwd=$GUI_PASS&mgmt_gui_clients_radio=any&install_mds_interface=eth0&reboot_if_required=true"`
+                  fi
+                fi
+
+            else
+
+              #Non Blink Enabled Image Configuration
+              echo "blink_config not found - using config_system">> /var/log/fwtlog
+              if [ $MGMT_INSTALL == "smartcenter" ]; then
+              echo "installation type = smartcenter">> /var/log/fwtlog
+                if [ $MGMT_TYPE == "primary" ]; then
+                    echo "management type = primary">> /var/log/fwtlog
+                    echo "Configuring Primary SmartCenter using Blink" | tee /dev/console >> /var/log/fwtlog
+                    CNFSYSTEM=`config_system -s "install_security_gw=false&install_ppak=false&gateway_cluster_member=false&install_security_managment=true&install_mgmt_primary=true&install mgmt_secondary=false&mgmt_admin_name=$GUI_USER&mgmt_admin_passwd=$GUI_PASS&mgmt_gui_clients_radio=any&reboot_if_required=true"`
+                else
+                    echo "management type = secondary">> /var/log/fwtlog
+                    echo "Configuring Secondary SmartCenter using Blink" | tee /dev/console >> /var/log/fwtlog
+                    CNFSYSTEM=`config_system -s "install_security_gw=false&install_ppak=false&gateway_cluster_member=false&install_security_managment=true&install_mgmt_primary=false&install mgmt_secondary=true&mgmt_admin_name=$GUI_USER&mgmt_admin_passwd=$GUI_PASS&mgmt_gui_clients_radio=any&ftw_sic_key=$SIC_KEY&reboot_if_required=true"`
+                fi
+              fi
+
+              if [ $MGMT_INSTALL == "multidomain" ]; then
+                if [ $MGMT_TYPE == "primary" ]; then
+                  echo "Configuring Primary MultiDomain Server using Blink" | tee /dev/console >> /var/log/fwtlog
+                  CNFSYSTEM=`config_system -s "install_security_gw=false&install_ppak=false&gateway_cluster_member=false&install_mds_primary=true&install_mds_secondary=false&mgmt_admin_name=$GUI_USER&mgmt_admin_passwd=$GUI_PASS&mgmt_gui_clients_radio=any&install_mds_interface=eth0&reboot_if_required=true"`
+                else
+                  echo "Configuring Secondary MultiDomain Server using Blink" | tee /dev/console >> /var/log/fwtlog
+                  CNFSYSTEM=`config_system -s "install_security_gw=false&install_ppak=false&gateway_cluster_member=false&install_mds_primary=false&install_mds_secondary=true&mgmt_admin_name=$GUI_USER&mgmt_admin_passwd=$GUI_PASS&mgmt_gui_clients_radio=any&ftw_sic_key=$SIC_KEY&install_mds_interface=eth0&reboot_if_required=true"`
+                fi
+              fi
+            fi
+
+
+            echo "$CNFSYSTEM" | tee /dev/console >> /var/log/fwtlog
+            echo "/etc/hosts after fwt" >> /var/log/fwtlog
+            cat /etc/hosts >> /var/log/fwtlog
+
+            #set password hash
+            echo "POST_CONFIGURATION_SCRIPT: setting admin password." | tee /dev/console
+            clish -c "set user admin password-hash $ADMIN_PW_HASH" -s
+
+            #set expert password
+            echo "POST_CONFIGURATION_SCRIPT: setting expert password." | tee /dev/console
+            clish -c "set expert-password-hash $EXPERT_PW_HASH" -s
+
+            #set default shell
+            echo "POST_CONFIGURATION_SCRIPT: setting admin shell to $ADMIN_SHELL." | tee /dev/console
+            clish -c "set user admin shell $ADMIN_SHELL" -s
+
+            echo "/etc/hosts after fwt" >> /var/log/fwtlog
+            cat /etc/hosts >> /var/log/fwtlog
+
+
+## Check Point Management Server
+ cp_mgmt:
+  type: OS::Nova::Server
+  properties:
+   name: {get_param: cp_name}
+   image: {get_param: cp_glance_image}
+   flavor: {get_param: cp_gw_flavor}
+   availability_zone: {get_param: cp_az}
+   config_drive: true
+   networks:
+    - port: { get_resource: cp_mgmt_port }
+   user_data_format: RAW
+   user_data: { get_resource: cp_config_script }
