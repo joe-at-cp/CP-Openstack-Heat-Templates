@@ -1,0 +1,506 @@
+heat_template_version: 2018-08-31
+
+description: Check Point CloudGuard Cluster Heat Template
+
+parameters:
+
+ cp_name:
+  type: string
+  description: Gateway/Cluster/MGMT Image Name as it will be created in Openstack
+  default: CPOpenStack
+
+ cp_sic_otp:
+  type: string
+  description: SIC one time password
+
+ cp_admin_hash:
+  type: string
+  description: admin password hash - to generate - openssl passwd -1 (-one not l) - default admin123
+  default: $1$0JcTFZjf$zd67.5HSIKz8.7K4bvmv31
+
+ cp_glance_image:
+  type: string
+  description: CP Gateway image name in Glance
+
+ cp_gw_flavor:
+  type: string
+  description: CP Gateway CPU/Mem/Disk Flavor Name - min 100gb disk - recommended 2vCPU , 2gb RAM
+
+ nova_affinity:
+  type: string
+  description: nova affinity - affinity - deploy cluster in one hypervisor - anti-affinity - deploy cluster on different hypervisors
+  default: anti-affinity
+
+ member1_name:
+   type: string
+   description: "Cluster Member 1 Virtual Machine Name"
+
+ member1_hostname:
+   type: string
+   description: "Cluster Member 1 Hostname Name"
+
+ member2_name:
+   type: string
+   description: "Cluster Member 2 Virtual Machine Name"
+
+ member2_hostname:
+   type: string
+   description: "Cluster Member 2 Hostname Name"
+
+ member1_az:
+   type: string
+   description: "Cluster Member 1 Availability Zone"
+
+ member2_az:
+   type: string
+   description: "Cluster Member 2 Availability Zone"
+
+ fixed_ip_assignment:
+  type: boolean
+  label: Subnet UUIDs
+  description: Deploy Template with Static IP Addresses
+  default: false
+
+ subnets:
+  type: comma_delimited_list
+  label: Subnet UUIDs
+  description: Comma Seperated List of Subnet UUIDs
+
+ member1_fixedips:
+  type: comma_delimited_list
+  label: Fixed IP List
+  default: ''
+  description: Comma Seperated List of Fixed IPs
+
+ member2_fixedips:
+  type: comma_delimited_list
+  label: Fixed IP List
+  default: ''
+  description: Comma Seperated List of Fixed IPs
+
+parameter_groups:
+  - label: General Settings
+    parameters:
+      - cp_name
+      - cp_glance_image
+      - cp_gw_flavor
+      - nova_affinity
+      - cp_sic_otp
+      - cp_admin_hash
+  - label: Cluster Member 1
+    parameters:
+      - member1_name
+      - member1_hostname
+      - member1_az
+  - label: Cluster Member 2
+    parameters:
+      - member2_name
+      - member2_hostname
+      - member2_az
+  - label: Network Settings
+    parameters:
+      - fixed_ip_assignment
+      - subnets
+      - member1_fixedips
+      - member2_fixedips
+
+
+# Conditions
+conditions:
+  fixed_ip_assignment: {equals : [{get_param: fixed_ip_assignment}, true]}
+  dynamic_ip_assignment: {equals : [{get_param: fixed_ip_assignment}, false]}
+
+resources:
+
+ member1_config_script:
+  type: OS::Heat::SoftwareConfig
+  properties:
+   group: ungrouped
+   config:
+    str_replace:
+        params:
+            #Set Hostname
+            __hostname__: {get_param: member1_hostname}
+            #installation type
+            __installfw__: "true"
+            __installmgmt__: "false"
+            #one time password
+            __sicpw__: {get_param: cp_sic_otp}
+            # this parameter will setup the admin and expert password hash
+            __osadminhash__: {get_param: cp_admin_hash}
+            __default_gw_network__: "eth0"
+            __adminshell__: "/etc/cli.sh"
+
+        template: |
+            #!/bin/bash
+            ########################################
+            # OpenStack Config Script For Blink Enabled Images
+            # Check Point Software Technologies
+            ###########################
+            # Global Variables
+            ###########################
+            # set to support multiple interfaces which receive different default GWs over DHCP
+            # the interface here will be used as a default GW
+            DEFAULT_GW_INTERFACE="__default_gw_network__"
+            SIC_KEY="__sicpw__"
+
+            HEAT_TEMPLATE_VER="4-8-19_NNICs"
+
+            #####################################
+            # configure here admin and expert hash credentials
+            # hash can be obtained from a linux system by looking at /etc/shadow
+            ####################################
+            ADMIN_PW_HASH='__osadminhash__'
+            EXPERT_PW_HASH='__osadminhash__'
+
+            ###############################
+            # DEFAULT SHELL = /etc/cli.sh
+            # Configure above in the 'params' if you would like to change it.
+            ###############################
+
+            ADMIN_SHELL='__adminshell__'
+
+            ############################
+            # MAIN PROGRAM
+            ###########################
+
+            echo "Heat Template Version: $HEAT_TEMPLATE_VER" >> /var/log/ftw.log
+
+            #Set Hostname
+            HOSTNAME="__hostname__"
+            clish -c "set hostname $HOSTNAME"
+
+            #Make all the strings lowercase
+
+            DEFAULT_GW_INTERFACE=`echo $DEFAULT_GW_INTERFACE | tr '[A-Z]' '[a-z]'`
+            INSTALL_GW=`echo $INSTALL_GW | tr '[A-Z]' '[a-z]'`
+            INSTALL_MGMT=`echo $INSTALL_MGMT | tr '[A-Z]' '[a-z]'`
+            POST_FIRST_TIME_WIZARD=`echo $POST_FIRST_TIME_WIZARD | tr '[A-Z]' '[a-z]'`
+
+            # set interfaces and routes from network_data.json (metadata)
+            DEFAULT_GW_INTERFACE="eth0"
+            for mac in `ifconfig -a | grep HWadd | awk '{print $5}' | tr '[A-Z]' '[a-z]'`
+            do
+                NIC=`ifconfig -a | grep -i $mac | awk '{print $1}' |  tr '[A-Z]' '[a-z]'`
+                echo $NIC
+                ID_CMD="get-cloud-data.sh openstack/latest/network_data.json | jq --raw-output '.links[] | select (.ethernet_mac_address | contains(\"$mac\")) | .id'"
+                eval NID=\$\(${ID_CMD}\)
+                IP_CMD="get-cloud-data.sh openstack/latest/network_data.json | jq --raw-output '.networks[] | select (.link | contains(\"$NID\"))'"
+                TYPE=`eval $IP_CMD | jq --raw-output .type`
+                IP=`eval $IP_CMD | jq --raw-output .ip_address`
+                NETMASK=`eval $IP_CMD | jq --raw-output .netmask`
+                clish -s -c "set interface $NIC ipv4-address $IP subnet-mask $NETMASK"
+                clish -s -c "set interface $NIC state on"
+                # loop thru the routes
+                ROUTES=`eval $IP_CMD | jq --raw-output .routes`
+                RTLENGTH=`echo $ROUTES | jq '. | length'`
+                RTCOUNTER=0
+                until [ $RTCOUNTER == $RTLENGTH ]
+                do
+                    ROUTE=`echo $ROUTES | jq .[$RTCOUNTER]`
+                    echo $ROUTE
+                    let RTCOUNTER=RTCOUNTER+1
+                    RTNETWORK=`echo $ROUTE | jq --raw-output .network`
+                    RTNETMASK=`echo $ROUTE | jq --raw-output .netmask`
+                    GATEWAY=`echo $ROUTE | jq --raw-output .gateway`
+                    bits="$("$FWDIR/Python/bin/python" -c "print len(''.join([bin(int(o))[2:].zfill(8) for o in '""$RTNETMASK""'.split('.')]).rstrip('0'))" )"
+                    if [ "$RTNETWORK" == "0.0.0.0" ]
+                    then
+                        if [ "$DEFAULT_GW_INTERFACE" == "$NIC" ]
+                        then
+                        clish -s -c "set static-route default nexthop gateway address $GATEWAY on"
+                        fi
+                    else
+                    clish -s -c "set static-route $RTNETWORK/$bits nexthop gateway address $GATEWAY on"
+                    fi
+                done
+
+            echo "======"
+            done
+            #command to set /etc/hosts file to the right interface
+            clish -s -c 'set management interface eth0'
+
+            ###########
+            # Configure Gateway System
+            ###########
+
+            #Configure first time wizard
+            if [ -e "/bin/blink_config" ]; then
+                echo "Configuring Image Using Blink_Config" | tee /dev/console >> /var/log/ftw.log
+                CNFSYSTEM=`blink_config -s "gateway_cluster_member=true&ftw_sic_key=$SIC_KEY&upload_info=true&download_info=true&admin_hash=$ADMIN_PW_HASH"`
+             else
+                echo "Configuring Image Using Config_System" | tee /dev/console >> /var/log/ftw.log
+                CNFSYSTEM=`config_system -s "install_security_gw=true&install_ppak=true&gateway_cluster_member=true&install_security_managment=false&ftw_sic_key=$SIC_KEY"`
+             fi
+
+            echo "  $CNFSYSTEM"  >> /var/log/ftw.log
+
+            #set password hash
+            echo "POST_CONFIGURATION_SCRIPT: setting admin password." | tee /dev/console
+            clish -c "set user admin password-hash $ADMIN_PW_HASH" -s
+
+            #set expert password
+            echo "POST_CONFIGURATION_SCRIPT: setting expert password." | tee /dev/console
+            clish -c "set expert-password-hash $EXPERT_PW_HASH" -s
+
+            #set default shell
+            echo "POST_CONFIGURATION_SCRIPT: setting admin shell to $ADMIN_SHELL." | tee /dev/console
+            clish -c "set user admin shell $ADMIN_SHELL" -s
+
+            #reboot
+            echo "Rebooting System Now"  >> /var/log/ftw.log
+            shutdown -r now
+
+ member2_config_script:
+  type: OS::Heat::SoftwareConfig
+  properties:
+   group: ungrouped
+   config:
+    str_replace:
+        params:
+            #Set Hostname
+            __hostname__: {get_param: member2_hostname}
+            #installation type
+            __installfw__: "true"
+            __installmgmt__: "false"
+            #one time password
+            __sicpw__: {get_param: cp_sic_otp}
+            # this parameter will setup the admin and expert password hash
+            __osadminhash__: {get_param: cp_admin_hash}
+            __default_gw_network__: "eth0"
+            __adminshell__: "/etc/cli.sh"
+
+        template: |
+            #!/bin/bash
+            ########################################
+            # OpenStack Config Script For Blink Enabled Images
+            # Check Point Software Technologies
+            ###########################
+            # Global Variables
+            ###########################
+            # set to support multiple interfaces which receive different default GWs over DHCP
+            # the interface here will be used as a default GW
+            DEFAULT_GW_INTERFACE="__default_gw_network__"
+            SIC_KEY="__sicpw__"
+
+            HEAT_TEMPLATE_VER="4-8-19_NNICs"
+
+            #####################################
+            # configure here admin and expert hash credentials
+            # hash can be obtained from a linux system by looking at /etc/shadow
+            ####################################
+            ADMIN_PW_HASH='__osadminhash__'
+            EXPERT_PW_HASH='__osadminhash__'
+
+            ###############################
+            # DEFAULT SHELL = /etc/cli.sh
+            # Configure above in the 'params' if you would like to change it.
+            ###############################
+
+            ADMIN_SHELL='__adminshell__'
+
+            ############################
+            # MAIN PROGRAM
+            ###########################
+
+            echo "Heat Template Version: $HEAT_TEMPLATE_VER" >> /var/log/ftw.log
+
+            #Set Hostname
+            HOSTNAME="__hostname__"
+            clish -c "set hostname $HOSTNAME"
+
+            #Make all the strings lowercase
+
+            DEFAULT_GW_INTERFACE=`echo $DEFAULT_GW_INTERFACE | tr '[A-Z]' '[a-z]'`
+            INSTALL_GW=`echo $INSTALL_GW | tr '[A-Z]' '[a-z]'`
+            INSTALL_MGMT=`echo $INSTALL_MGMT | tr '[A-Z]' '[a-z]'`
+            POST_FIRST_TIME_WIZARD=`echo $POST_FIRST_TIME_WIZARD | tr '[A-Z]' '[a-z]'`
+
+            # set interfaces and routes from network_data.json (metadata)
+            DEFAULT_GW_INTERFACE="eth0"
+            for mac in `ifconfig -a | grep HWadd | awk '{print $5}' | tr '[A-Z]' '[a-z]'`
+            do
+                NIC=`ifconfig -a | grep -i $mac | awk '{print $1}' |  tr '[A-Z]' '[a-z]'`
+                echo $NIC
+                ID_CMD="get-cloud-data.sh openstack/latest/network_data.json | jq --raw-output '.links[] | select (.ethernet_mac_address | contains(\"$mac\")) | .id'"
+                eval NID=\$\(${ID_CMD}\)
+                IP_CMD="get-cloud-data.sh openstack/latest/network_data.json | jq --raw-output '.networks[] | select (.link | contains(\"$NID\"))'"
+                TYPE=`eval $IP_CMD | jq --raw-output .type`
+                IP=`eval $IP_CMD | jq --raw-output .ip_address`
+                NETMASK=`eval $IP_CMD | jq --raw-output .netmask`
+                clish -s -c "set interface $NIC ipv4-address $IP subnet-mask $NETMASK"
+                clish -s -c "set interface $NIC state on"
+                # loop thru the routes
+                ROUTES=`eval $IP_CMD | jq --raw-output .routes`
+                RTLENGTH=`echo $ROUTES | jq '. | length'`
+                RTCOUNTER=0
+                until [ $RTCOUNTER == $RTLENGTH ]
+                do
+                    ROUTE=`echo $ROUTES | jq .[$RTCOUNTER]`
+                    echo $ROUTE
+                    let RTCOUNTER=RTCOUNTER+1
+                    RTNETWORK=`echo $ROUTE | jq --raw-output .network`
+                    RTNETMASK=`echo $ROUTE | jq --raw-output .netmask`
+                    GATEWAY=`echo $ROUTE | jq --raw-output .gateway`
+                    bits="$("$FWDIR/Python/bin/python" -c "print len(''.join([bin(int(o))[2:].zfill(8) for o in '""$RTNETMASK""'.split('.')]).rstrip('0'))" )"
+                    if [ "$RTNETWORK" == "0.0.0.0" ]
+                    then
+                        if [ "$DEFAULT_GW_INTERFACE" == "$NIC" ]
+                        then
+                        clish -s -c "set static-route default nexthop gateway address $GATEWAY on"
+                        fi
+                    else
+                    clish -s -c "set static-route $RTNETWORK/$bits nexthop gateway address $GATEWAY on"
+                    fi
+                done
+
+            echo "======"
+            done
+            #command to set /etc/hosts file to the right interface
+            clish -s -c 'set management interface eth0'
+
+            ###########
+            # Configure Gateway System
+            ###########
+
+            #Configure first time wizard
+            if [ -e "/bin/blink_config" ]; then
+                echo "Configuring Image Using Blink_Config" | tee /dev/console >> /var/log/ftw.log
+                CNFSYSTEM=`blink_config -s "gateway_cluster_member=true&ftw_sic_key=$SIC_KEY&upload_info=true&download_info=true&admin_hash=$ADMIN_PW_HASH&reboot_if_required=true"`
+             else
+                echo "Configuring Image Using Config_System" | tee /dev/console >> /var/log/ftw.log
+                CNFSYSTEM=`config_system -s "install_security_gw=$INSTALL_GW&install_ppak=true&gateway_cluster_member=true&install_security_managment=$INSTALL_MGMT&ftw_sic_key=$SIC_KEY&reboot_if_required=true"`
+             fi
+
+            echo "  $CNFSYSTEM"  >> /var/log/ftw.log
+
+            #set password hash
+            echo "POST_CONFIGURATION_SCRIPT: setting admin password." | tee /dev/console
+            clish -c "set user admin password-hash $ADMIN_PW_HASH" -s
+
+            #set expert password
+            echo "POST_CONFIGURATION_SCRIPT: setting expert password." | tee /dev/console
+            clish -c "set expert-password-hash $EXPERT_PW_HASH" -s
+
+            #set default shell
+            echo "POST_CONFIGURATION_SCRIPT: setting admin shell to $ADMIN_SHELL." | tee /dev/console
+            clish -c "set user admin shell $ADMIN_SHELL" -s
+
+            #reboot
+            echo "Rebooting System Now"  >> /var/log/ftw.log
+            shutdown -r now
+
+
+ cp_cluster_group:
+  type: OS::Nova::ServerGroup
+  properties:
+   name:
+        list_join: ['', [ {get_param: cp_name},'ng']]
+   policies: [ get_param: nova_affinity ]
+
+
+## Check Point Cluster Member 1 - Fixed IP
+ cp_member1_static:
+  type: OS::Nova::Server
+  condition: fixed_ip_assignment
+  depends_on: cp_cluster_group
+  properties:
+   name: { get_param: member1_name}
+   image: {get_param: cp_glance_image}
+   flavor: {get_param: cp_gw_flavor}
+   availability_zone: {get_param: member1_az}
+   config_drive: true
+   scheduler_hints: { group: { get_resource: cp_cluster_group } }
+   networks:
+     repeat:
+       permutations: false
+       for_each:
+         <%subnet%>: { get_param: subnets }
+         <%member1_fixedip%>: { get_param: member1_fixedips }
+       template:
+         subnet: <%subnet%>
+         fixed_ip: <%member1_fixedip%>
+         port_extra_properties:
+           port_security_enabled: false
+   user_data_format: RAW
+   user_data: { get_resource: member1_config_script }
+
+## Check Point Cluster Member 2 - Fixed IP
+ cp_member2_static:
+  type: OS::Nova::Server
+  condition: fixed_ip_assignment
+  depends_on: cp_cluster_group
+  properties:
+   name: { get_param: member2_name}
+   image: {get_param: cp_glance_image}
+   flavor: {get_param: cp_gw_flavor}
+   availability_zone: {get_param: member2_az}
+   config_drive: true
+   scheduler_hints: { group: { get_resource: cp_cluster_group } }
+   networks:
+     repeat:
+       permutations: false
+       for_each:
+         <%subnet%>: { get_param: subnets }
+         <%member2_fixedip%>: { get_param: member2_fixedips }
+       template:
+         subnet: <%subnet%>
+         fixed_ip: <%member2_fixedip%>
+         port_extra_properties:
+           port_security_enabled: false
+   user_data_format: RAW
+   user_data: { get_resource: member2_config_script }
+
+
+## Check Point Cluster Member 1 - Dynamic IP
+ cp_member1_dynamic:
+  type: OS::Nova::Server
+  condition: dynamic_ip_assignment
+  depends_on: cp_cluster_group
+  properties:
+   name: { get_param: member1_name}
+   image: {get_param: cp_glance_image}
+   flavor: {get_param: cp_gw_flavor}
+   availability_zone: {get_param: member1_az}
+   config_drive: true
+   scheduler_hints: { group: { get_resource: cp_cluster_group } }
+   networks:
+     repeat:
+       permutations: false
+       for_each:
+         <%subnet%>: { get_param: subnets }
+       template:
+         subnet: <%subnet%>
+         port_extra_properties:
+           port_security_enabled: false
+   user_data_format: RAW
+   user_data: { get_resource: member1_config_script }
+
+## Check Point Cluster Member 2 - Dynaimc IP
+ cp_member2_dynamic:
+  type: OS::Nova::Server
+  condition: dynamic_ip_assignment
+  depends_on: cp_cluster_group
+  properties:
+   name: { get_param: member2_name}
+   image: {get_param: cp_glance_image}
+   flavor: {get_param: cp_gw_flavor}
+   availability_zone: {get_param: member2_az}
+   config_drive: true
+   scheduler_hints: { group: { get_resource: cp_cluster_group } }
+   networks:
+     repeat:
+       permutations: false
+       for_each:
+         <%subnet%>: { get_param: subnets }
+       template:
+         subnet: <%subnet%>
+         port_extra_properties:
+           port_security_enabled: false
+   user_data_format: RAW
+   user_data: { get_resource: member2_config_script }
+
+outputs:
+  cp_template_version:
+    description: Check Point Heat Template Version
+    value: 4-8-19_NNICs
