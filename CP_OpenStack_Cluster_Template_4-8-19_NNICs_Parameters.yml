@@ -1,0 +1,41 @@
+#Static IP Assignment Example Parameters
+parameters:
+
+ cp_name: CheckPoint_NNICs
+ cp_admin_hash: $1$0JcTFZjf$zd67.5HSIKz8.7K4bvmv31
+ cp_glance_image: Check_Point_R80.20_GOGO_T28_Blink_VRRP
+ cp_sic_otp: vpn123
+ cp_gw_flavor: CheckPoint_100G
+ nova_affinity: affinity
+ member1_name: CloudGuard1
+ member1_hostname: CGMember1
+ member2_name: CloudGuard2
+ member2_hostname: CGMember2
+ member1_az: nova
+ member2_az: nova
+ subnets: a6c4eb4c-ecaa-4b03-bcb3-7012ec35c5b0,57fa3933-67e3-41ad-8197-eb987a37bb5f
+ member1_fixedips: 10.200.1.87,172.16.100.87
+ member2_fixedips: 10.200.1.88,172.16.100.88
+ fixed_ip_assignment: true
+
+
+
+#Dynamic IP Assignment Example Parameters
+ parameters:
+
+  cp_name: CheckPoint_NNICs
+  cp_admin_hash: $1$0JcTFZjf$zd67.5HSIKz8.7K4bvmv31
+  cp_glance_image: Check_Point_R80.20_GOGO_T28_Blink_VRRP
+  cp_sic_otp: vpn123
+  cp_gw_flavor: CheckPoint_100G
+  nova_affinity: affinity
+  member1_name: CloudGuard1
+  member1_hostname: CGMember1
+  member2_name: CloudGuard2
+  member2_hostname: CGMember2
+  member1_az: nova
+  member2_az: nova
+  subnets: a6c4eb4c-ecaa-4b03-bcb3-7012ec35c5b0,98b3aad4-9a4d-489e-94a6-90a0bdd6e75a,708bfeae-187e-4a85-9a1b-19b3b00c0036
+  member1_fixedips:
+  member2_fixedips:
+  fixed_ip_assignment: false
