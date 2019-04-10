@@ -1,1 +1,1 @@
-# CP-Openstack-Heat-Templates
+# Check Point Openstack Heat Templates
