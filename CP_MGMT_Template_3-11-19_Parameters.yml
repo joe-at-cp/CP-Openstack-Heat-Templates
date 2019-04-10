@@ -1,0 +1,16 @@
+#Example Parameters
+
+parameters:
+  cp_name: CheckPointMGMT
+  cp_hostname: CheckPointMgmt
+  cp_mgmt_installation: smartcenter
+  cp_mgmt_type: primary
+  cp_gui_admin_user: admin
+  cp_gui_admin_password: vpn123
+  cp_sic_otp: vpn123
+  cp_admin_hash: $1$0JcTFZjf$zd67.5HSIKz8.7K4bvmv31
+  cp_glance_image: Check_Point_R80.20_Halo1
+  cp_gw_flavor: CheckPoint_100G
+  cp_az: nova
+  mgmt_network_uuid: 5e421c1a-54b7-496d-a02a-08965d5440d6
+  mgmt_subnet_uuid: a6c4eb4c-ecaa-4b03-bcb3-7012ec35c5b0
