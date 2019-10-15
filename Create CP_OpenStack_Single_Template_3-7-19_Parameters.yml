@@ -1,0 +1,14 @@
+parameters:
+
+ cp_name: CloudGuard
+ cp_hostname: CloudGuard_GW
+ nova_affinity: affinity
+ cp_az: nova
+ cp_sic_otp: vpn123
+ cp_admin_hash: $1$0JcTFZjf$zd67.5HSIKz8.7K4bvmv31
+ cp_glance_image: Check-Point-R80.20
+ cp_gw_flavor: CheckPoint_100G
+ external_net_uuid: 5e421c1a-54b7-496d-a02a-08965d5440d6
+ external_subnet_uuid: a6c4eb4c-ecaa-4b03-bcb3-7012ec35c5b0
+ internal-1_net_uuid: 6757cbc2-b6b8-41c0-bf80-c2aa4f449369
+ internal-1_subnet_uuid: 57fa3933-67e3-41ad-8197-eb987a37bb5f
