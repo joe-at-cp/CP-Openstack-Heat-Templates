@@ -1,0 +1,233 @@
+heat_template_version: 2017-02-24
+
+parameters:
+
+  cp_name:
+   type: string
+   description: Gateway/Cluster/MGMT Image Name as it will be created in Openstack
+   default: CPOpenStack
+
+  cp_hostname:
+   type: string
+   description: Gateway/Cluster/MGMT Hostname
+
+  cp_sic_otp:
+   type: string
+   description: SIC one time password
+
+  cp_admin_hash:
+   type: string
+   description: admin password hash - to generate - openssl passwd -1 (-one not l) - default admin123
+   default: $1$0JcTFZjf$zd67.5HSIKz8.7K4bvmv31
+
+  cp_glance_image:
+   type: string
+   description: CP Gateway image name in Glance
+
+  cp_gw_flavor:
+   type: string
+   description: CP Gateway CPU/Mem/Disk Flavor Name - min 100gb disk - recommended 2vCPU , 2gb RAM
+
+  nova_affinity:
+   type: string
+   description: nova affinity - affinity - deploy cluster in one hypervisor - anti-affinity - deploy cluster on different hypervisors
+   default: anti-affinity
+
+  cp_az:
+    type: string
+    description: "Availability Zone"
+
+  external_net_uuid:
+    type: string
+    description: "UUID of the network considered external in openstack"
+
+  external_subnet_uuid:
+    type: string
+    description: "UUID of the subnet inside the external network"
+
+  internal-1_net_uuid:
+    type: string
+    description: "UUID of the network considered internal in openstack"
+
+  internal-1_subnet_uuid:
+    type: string
+    description: "UUID of the subnet inside the internal network"
+
+
+resources:
+
+# Internal Ports
+ cp_internal-1_port:
+  type: OS::Neutron::Port
+  properties:
+   network: {get_param: internal-1_net_uuid }
+   port_security_enabled: false
+   fixed_ips: [{subnet_id : {get_param: internal-1_subnet_uuid}}]
+
+
+## External Ports
+ cp_tenant_external_port:
+  type: OS::Neutron::Port
+  properties:
+   network_id: {get_param: external_net_uuid }
+   port_security_enabled: false
+   fixed_ips: [{subnet_id : {get_param: external_subnet_uuid}}]
+
+
+ cp_config_script:
+  type: OS::Heat::SoftwareConfig
+  properties:
+   group: ungrouped
+   config:
+    str_replace:
+        params:
+            #Set Hostname
+            __hostname__: {get_param: cp_hostname}
+            #installation type
+            __installfw__: "true"
+            __installmgmt__: "false"
+            #one time password
+            __sicpw__: {get_param: cp_sic_otp}
+            # this parameter will setup the admin and expert password hash
+            __osadminhash__: {get_param: cp_admin_hash}
+            __default_gw_network__: "eth0"
+            __adminshell__: "/etc/cli.sh"
+        template: |
+            #!/bin/bash
+            ########################################
+            # OpenStack Config Script For Blink Enabled Images
+            # Check Point Software Technologies
+            ###########################
+            # Global Variables
+            ###########################
+            # set to support multiple interfaces which receive different default GWs over DHCP
+            # the interface here will be used as a default GW
+            DEFAULT_GW_INTERFACE="__default_gw_network__"
+            SIC_KEY="__sicpw__"
+
+            #####################################
+            # configure here admin and expert hash credentials
+            # hash can be obtained from a linux system by looking at /etc/shadow
+            ####################################
+            ADMIN_PW_HASH='__osadminhash__'
+            EXPERT_PW_HASH='__osadminhash__'
+
+            ###############################
+            # DEFAULT SHELL = /etc/cli.sh
+            # Configure above in the 'params' if you would like to change it.
+            ###############################
+
+            ADMIN_SHELL='__adminshell__'
+
+            ############################
+            # MAIN PROGRAM
+            ###########################
+
+            #Set Hostname
+            HOSTNAME="__hostname__"
+            clish -c "set hostname $HOSTNAME"
+
+            #Make all the strings lowercase
+
+            DEFAULT_GW_INTERFACE=`echo $DEFAULT_GW_INTERFACE | tr '[A-Z]' '[a-z]'`
+            INSTALL_GW=`echo $INSTALL_GW | tr '[A-Z]' '[a-z]'`
+            INSTALL_MGMT=`echo $INSTALL_MGMT | tr '[A-Z]' '[a-z]'`
+            POST_FIRST_TIME_WIZARD=`echo $POST_FIRST_TIME_WIZARD | tr '[A-Z]' '[a-z]'`
+
+            # set interfaces and routes from network_data.json (metadata)
+            DEFAULT_GW_INTERFACE="eth0"
+            for mac in `ifconfig -a | grep HWadd | awk '{print $5}' | tr '[A-Z]' '[a-z]'`
+            do
+                NIC=`ifconfig -a | grep -i $mac | awk '{print $1}' |  tr '[A-Z]' '[a-z]'`
+                echo $NIC
+                ID_CMD="get-cloud-data.sh openstack/latest/network_data.json | jq --raw-output '.links[] | select (.ethernet_mac_address | contains(\"$mac\")) | .id'"
+                eval NID=\$\(${ID_CMD}\)
+                IP_CMD="get-cloud-data.sh openstack/latest/network_data.json | jq --raw-output '.networks[] | select (.link | contains(\"$NID\"))'"
+                TYPE=`eval $IP_CMD | jq --raw-output .type`
+                IP=`eval $IP_CMD | jq --raw-output .ip_address`
+                NETMASK=`eval $IP_CMD | jq --raw-output .netmask`
+                clish -s -c "set interface $NIC ipv4-address $IP subnet-mask $NETMASK"
+                clish -s -c "set interface $NIC state on"
+                # loop thru the routes
+                ROUTES=`eval $IP_CMD | jq --raw-output .routes`
+                RTLENGTH=`echo $ROUTES | jq '. | length'`
+                RTCOUNTER=0
+                until [ $RTCOUNTER == $RTLENGTH ]
+                do
+                    ROUTE=`echo $ROUTES | jq .[$RTCOUNTER]`
+                    echo $ROUTE
+                    let RTCOUNTER=RTCOUNTER+1
+                    RTNETWORK=`echo $ROUTE | jq --raw-output .network`
+                    RTNETMASK=`echo $ROUTE | jq --raw-output .netmask`
+                    GATEWAY=`echo $ROUTE | jq --raw-output .gateway`
+                    bits="$("$FWDIR/Python/bin/python" -c "print len(''.join([bin(int(o))[2:].zfill(8) for o in '""$RTNETMASK""'.split('.')]).rstrip('0'))" )"
+                    if [ "$RTNETWORK" == "0.0.0.0" ]
+                    then
+                        if [ "$DEFAULT_GW_INTERFACE" == "$NIC" ]
+                        then
+                        clish -s -c "set static-route default nexthop gateway address $GATEWAY on"
+                        fi
+                    else
+                    clish -s -c "set static-route $RTNETWORK/$bits nexthop gateway address $GATEWAY on"
+                    fi
+                done
+
+            echo "======"
+            done
+            #command to set /etc/hosts file to the right interface
+            clish -s -c 'set management interface eth0'
+
+            ###########
+            # Configure Gateway System
+            ###########
+
+            echo "/etc/hosts before fwt" >> /var/log/fwtlog
+            cat /etc/hosts >> /var/log/fwtlog
+
+            #Configure first time wizard
+            if [ -e "/bin/blink_config" ]; then
+                echo "Configuring Image Using Blink_Config" | tee /dev/console >> /var/log/fwtlog
+                CNFSYSTEM=`blink_config -s "gateway_cluster_member=true&ftw_sic_key=$SIC_KEY&upload_info=true&download_info=true&admin_hash=$ADMIN_PW_HASH"`
+             else
+                echo "Configuring Image Using Config_System" | tee /dev/console >> /var/log/fwtlog
+                CNFSYSTEM=`config_system -s "install_security_gw=true&install_ppak=true&gateway_cluster_member=true&install_security_managment=false&ftw_sic_key=$SIC_KEY"`
+             fi
+
+            echo "$CNFSYSTEM" | tee /dev/console >> /var/log/fwtlog
+            echo "/etc/hosts after fwt" >> /var/log/fwtlog
+            cat /etc/hosts >> /var/log/fwtlog
+
+            #set password hash
+            echo "POST_CONFIGURATION_SCRIPT: setting admin password." | tee /dev/console
+            clish -c "set user admin password-hash $ADMIN_PW_HASH" -s
+
+            #set expert password
+            echo "POST_CONFIGURATION_SCRIPT: setting expert password." | tee /dev/console
+            clish -c "set expert-password-hash $EXPERT_PW_HASH" -s
+
+            #set default shell
+            echo "POST_CONFIGURATION_SCRIPT: setting admin shell to $ADMIN_SHELL." | tee /dev/console
+            clish -c "set user admin shell $ADMIN_SHELL" -s
+
+            echo "/etc/hosts after fwt" >> /var/log/fwtlog
+            cat /etc/hosts >> /var/log/fwtlog
+
+## Server Group with Affinity - anti-affinity = different compute nodes
+## Affinity = same compute node
+
+## Check Point Cluster Member 1
+ cp_member1:
+  type: OS::Nova::Server
+  #depends_on: cp_cluster_group
+  properties:
+   name: {get_param: cp_name}
+   image: {get_param: cp_glance_image}
+   flavor: {get_param: cp_gw_flavor}
+   availability_zone: {get_param: cp_az}
+   config_drive: true
+   #scheduler_hints: { group: { get_resource: cp_cluster_group } }
+   networks:
+    - port: { get_resource: cp_tenant_external_port }
+    - port: { get_resource: cp_internal-1_port }
+   user_data_format: RAW
+   user_data: { get_resource: cp_config_script }
